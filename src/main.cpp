@@ -26,6 +26,16 @@ uint8_t HeartChar[8] = {
     0b00000,
     0b00000};
 
+uint8_t DegreeChar[8] = {
+    B00110,
+    B01001,
+    B01001,
+    B00110,
+    B00000,
+    B00000,
+    B00000,
+    B00000};
+
 // SENSOR MLX90614
 float body_temp = 0.0;
 
@@ -166,10 +176,10 @@ void sensorMax()
 
       // send samples and calculation result to terminal program through UART
 
-      // int32_t trueHR = heartRate - 44.1;
-      // int32_t trueOxy = spo2 - 1.2;
+      int32_t trueHR = heartRate - 85.2;
+      int32_t trueOxy = spo2 - 2.4;
 
-      if (validHeartRate == 1 && validSPO2 == 1 && spo2 >= 88)
+      if (validHeartRate == 1 && validSPO2 == 1 && trueOxy >= 88 && trueOxy <= 100 && trueHR >= 50 && trueHR <= 120)
       {
         Serial.print(F("red="));
         Serial.print(redBuffer[i], DEC);
@@ -177,29 +187,29 @@ void sensorMax()
         Serial.print(irBuffer[i], DEC);
 
         Serial.print(F(", HR="));
-        Serial.print(heartRate, DEC);
+        Serial.print(trueHR, DEC);
 
         Serial.print(F(", HRvalid="));
         Serial.print(validHeartRate, DEC);
 
         Serial.print(F(", SPO2="));
-        Serial.print(spo2, DEC);
+        Serial.print(trueOxy, DEC);
 
         Serial.print(F(", SPO2Valid="));
         Serial.println(validSPO2, DEC);
 
         lcd.setCursor(2, 1);
-        lcd.print(heartRate);
+        lcd.print(trueHR);
         // lcd.print("<3");
         lcd.write(byte(0));
         lcd.print(" | ");
-        lcd.print(spo2);
+        lcd.print(trueOxy);
         lcd.print(" %");
 
         heartDataCounter += 1;
-        heartTotalData += heartRate;
+        heartTotalData += trueHR;
         oxyDataCounter += 1;
-        oxyTotalData += spo2;
+        oxyTotalData += trueOxy;
       }
     }
 
@@ -235,6 +245,7 @@ void setup()
   lcd.setCursor(0, 1);
   lcd.print("Device Standby");
   lcd.createChar(0, HeartChar);
+  lcd.createChar(1, DegreeChar);
 
   // SET UP MLX90614
   Serial.println("Adafruit MLX90614 test");
@@ -288,12 +299,16 @@ void loop()
         lcd.print("Ukur Suhu Tubuh");
         lcd.setCursor(0, 1);
         lcd.print("Suhu: ");
+        lcd.write(byte(1));
+        lcd.print("C");
         isAllowTolcdTemperature = false;
       }
-      body_temp = mlx.readObjectTempC();
+      body_temp = mlx.readObjectTempC() + 2.253;
 
       lcd.setCursor(5, 1);
       lcd.print(body_temp);
+      lcd.write(byte(1));
+      lcd.print("C");
 
       // Serial.print("Emissivity = ");
       // Serial.println(mlx.readEmissivity());
