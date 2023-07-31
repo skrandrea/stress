@@ -1,5 +1,6 @@
 #define MAX_BRIGHTNESS 255
 #define REPORTING_PERIOD_MS 1000
+#define OXY_SAMPLE 60
 
 #include <Arduino.h>
 #include <Adafruit_MLX90614.h>
@@ -13,7 +14,7 @@
 #include "heartRate.h"
 
 MAX30105 particleSensor;
-
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 
 uint8_t HeartChar[8] = {
@@ -50,16 +51,29 @@ int32_t heartRate;
 int8_t validSPO2;
 int8_t validHeartRate;
 
+int32_t trueOxy;
+int32_t trueHR;
+
 byte pulseLED = 2; // onboard led on esp32 nodemcu
 byte readLED = 19;
+
+const byte RATE_SIZE = 4; // Increase this for more averaging. 4 is good.
+byte rates[RATE_SIZE];    // Array of heart rates
+byte rateSpot = 0;
+long lastBeat = 0; // Time at which the last beat occurred
+
+float beatsPerMinute;
+int beatAvg;
 
 // Pengukuran
 boolean isMeasurement = false;
 boolean isAllowMeasureTemperature = false;
-boolean isAllowMeasureMAX30102 = false;
+boolean isAllowMeasureHeartRate = false;
+boolean isAllowMeasureOxy = false;
 boolean isAllowToSendData = false;
 boolean isAllowTolcdTemperature = false;
-boolean isAllowTolcdMAX30102 = false;
+boolean isAllowTolcdHeartRate = false;
+boolean isAllowTolcdOxy = false;
 
 // Data
 String SSID = "deya";
@@ -73,13 +87,14 @@ long heartDataCounter = 0;
 long heartTotalData = 0;
 unsigned long temperatureTimeStamp = 0;
 unsigned long temperatureInterval = 5000;
-unsigned long max30102TimeStamp = 0;
-unsigned long max30102Interval = 3000;
+unsigned long heartRateTimeStamp = 0;
+unsigned long heartRateInterval = 30000;
+unsigned long oxyTimeStamp = 0;
+unsigned long oxyInterval = 30000;
 const char *MQTT_SERVER = "103.139.192.253";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
-LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 void callback(char *topic, byte *payload, unsigned int length)
 {
@@ -128,102 +143,12 @@ void reconnect()
   }
 }
 
-void sensorMax()
-{
-
-  bufferLength = 50; // buffer length of 100 stores 4 seconds of samples running at 25sps
-
-  // read the first 100 samples, and determine the signal range
-  for (byte i = 0; i < bufferLength; i++)
-  {
-    while (particleSensor.available() == false) // do we have new data?
-      particleSensor.check();                   // Check the sensor for new data
-
-    redBuffer[i] = particleSensor.getRed();
-    irBuffer[i] = particleSensor.getIR();
-    particleSensor.nextSample(); // We're finished with this sample so move to next sample
-
-    Serial.print(F("red="));
-    Serial.print(redBuffer[i], DEC);
-    Serial.print(F(", ir="));
-    Serial.println(irBuffer[i], DEC);
-  }
-
-  // calculate heart rate and SpO2 after first 100 samples (first 4 seconds of samples)
-  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
-
-  // Continuously taking samples from MAX30102.  Heart rate and SpO2 are calculated every 1 second
-  while (1 && particleSensor.getIR() >= 100000)
-  {
-    // dumping the first 30 sets of samples in the memory and shift the last 70 sets of samples to the top
-    for (byte i = 30; i < 100; i++)
-    {
-      redBuffer[i - 30] = redBuffer[i];
-      irBuffer[i - 30] = irBuffer[i];
-    }
-
-    // take 70 sets of samples before calculating the heart rate.
-    for (byte i = 70; i < 100; i++)
-    {
-      while (particleSensor.available() == false) // do we have new data?
-        particleSensor.check();                   // Check the sensor for new data
-
-      digitalWrite(readLED, !digitalRead(readLED)); // Blink onboard LED with every data read
-
-      redBuffer[i] = particleSensor.getRed();
-      irBuffer[i] = particleSensor.getIR();
-      particleSensor.nextSample(); // We're finished with this sample so move to next sample
-
-      // send samples and calculation result to terminal program through UART
-
-      int32_t trueHR = heartRate - 85.2;
-      int32_t trueOxy = spo2 - 2.4;
-
-      if (validHeartRate == 1 && validSPO2 == 1 && trueOxy >= 88 && trueOxy <= 100 && trueHR >= 50 && trueHR <= 120)
-      {
-        Serial.print(F("red="));
-        Serial.print(redBuffer[i], DEC);
-        Serial.print(F(", ir="));
-        Serial.print(irBuffer[i], DEC);
-
-        Serial.print(F(", HR="));
-        Serial.print(trueHR, DEC);
-
-        Serial.print(F(", HRvalid="));
-        Serial.print(validHeartRate, DEC);
-
-        Serial.print(F(", SPO2="));
-        Serial.print(trueOxy, DEC);
-
-        Serial.print(F(", SPO2Valid="));
-        Serial.println(validSPO2, DEC);
-
-        lcd.setCursor(2, 1);
-        lcd.print(trueHR);
-        // lcd.print("<3");
-        lcd.write(byte(0));
-        lcd.print(" | ");
-        lcd.print(trueOxy);
-        lcd.print(" %");
-
-        heartDataCounter += 1;
-        heartTotalData += trueHR;
-        oxyDataCounter += 1;
-        oxyTotalData += trueOxy;
-      }
-    }
-
-    // //After gathering 25 new samples recalculate HR and SP02
-    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
-  }
-}
-
 void setup()
 {
   Serial.begin(115200);
+  Wire.begin();
 
   WiFi.begin("deya", "smbx3835");
-  lcd.init();
 
   while (WiFi.status() != WL_CONNECTED)
   {
@@ -237,6 +162,7 @@ void setup()
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
 
+  lcd.init();
   lcd.setBacklight(1);
   lcd.setContrast(2);
   lcd.clear();
@@ -245,7 +171,6 @@ void setup()
   lcd.setCursor(0, 1);
   lcd.print("Device Standby");
   lcd.createChar(0, HeartChar);
-  lcd.createChar(1, DegreeChar);
 
   // SET UP MLX90614
   Serial.println("Adafruit MLX90614 test");
@@ -257,6 +182,11 @@ void setup()
   ledcWrite(0, 255);
 
   Serial.println("Initializing Pulse Oximeter..");
+  // while (!particleSensor.begin())
+  // {
+  //   Serial.println("MAX30102 was not found");
+  //   delay(1000);
+  // }
   particleSensor.begin(Wire, I2C_SPEED_FAST);                                                    // Use default I2C port, 400kHz speed
   byte ledBrightness = 50;                                                                       // Options: 0=Off to 255=50mA
   byte sampleAverage = 1;                                                                        // Options: 1, 2, 4, 8, 16, 32
@@ -299,19 +229,15 @@ void loop()
         lcd.print("Ukur Suhu Tubuh");
         lcd.setCursor(0, 1);
         lcd.print("Suhu: ");
-        lcd.write(byte(1));
-        lcd.print("C");
         isAllowTolcdTemperature = false;
       }
       body_temp = mlx.readObjectTempC() + 2.253;
-
-      lcd.setCursor(5, 1);
+      lcd.setCursor(6, 1);
       lcd.print(body_temp);
-      lcd.write(byte(1));
-      lcd.print("C");
+      lcd.print("*C");
 
-      // Serial.print("Emissivity = ");
-      // Serial.println(mlx.readEmissivity());
+      Serial.print("Emissivity = ");
+      Serial.println(mlx.readEmissivity());
       Serial.print("Suhu tubuh = ");
       Serial.println(body_temp);
       temperatureDataCounter += 1;
@@ -323,47 +249,195 @@ void loop()
     {
 
       isAllowMeasureTemperature = false;
-      isAllowMeasureMAX30102 = true;
-      isAllowTolcdMAX30102 = true;
-      max30102TimeStamp = millis();
+      isAllowMeasureHeartRate = true;
+      isAllowTolcdHeartRate = true;
+      heartRateTimeStamp = millis();
       Serial.println("Pengukuran dengan MLX90614 dihentikan.");
       delay(3000);
     }
 
-    //---------2. HR & OKSIGEN-----------
-    if (millis() - max30102TimeStamp < max30102Interval &&
-        isAllowMeasureMAX30102)
+    //---------2. HR -----------
+    if (millis() - heartRateTimeStamp < heartRateInterval &&
+        isAllowMeasureHeartRate)
     {
 
       // lcd ONCE
-      if (isAllowTolcdMAX30102)
+      if (isAllowTolcdHeartRate)
       {
-        Serial.println("Pengukuran MAX30102");
+        Serial.println("Pengukuran HR");
         lcd.clear();
         lcd.setCursor(1, 0);
-        lcd.print("Ukur HR & SpO2 ");
-        delay(5000);
+        lcd.print("Ukur HR");
+        // delay(5000);
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("HeartRate | SpO2");
+        lcd.print("HeartRate");
+        isAllowTolcdHeartRate = false;
       }
 
-      sensorMax();
+      // sensorMax();
+      // LAKUKAN PERHITUNGAN RATA-RATA MAX DI SINI
+      long irValue = particleSensor.getIR();
+      Serial.print("IR=");
+      Serial.println(irValue);
+
+      if (checkForBeat(irValue) == true)
+      {
+        // We sensed a beat!
+        long delta = millis() - lastBeat;
+        lastBeat = millis();
+
+        beatsPerMinute = 60 / (delta / 1000.0);
+        Serial.print(", BPM=");
+        Serial.println(beatsPerMinute);
+
+        if (beatsPerMinute < 255 && beatsPerMinute > 20)
+        {
+          rates[rateSpot++] = (byte)beatsPerMinute; // Store this reading in the array
+          rateSpot %= RATE_SIZE;                    // Wrap variable
+
+          // Take average of readings
+          beatAvg = 0;
+          for (byte x = 0; x < RATE_SIZE; x++)
+            beatAvg += rates[x];
+          beatAvg /= RATE_SIZE;
+
+          Serial.print(", Avg BPM=");
+          Serial.println(beatAvg);
+          lcd.setCursor(5, 1);
+          lcd.print(beatAvg);
+          lcd.write(byte(0));
+        }
+      }
     }
 
-    if (millis() - max30102TimeStamp > max30102Interval &&
-        isAllowMeasureMAX30102)
+    if (millis() - heartRateTimeStamp > heartRateInterval &&
+        isAllowMeasureHeartRate)
     {
-      isAllowMeasureMAX30102 = false;
-      Serial.println("Pengukuran dengan MAX30102 dihentikan.");
-      isAllowToSendData = true;
+      isAllowMeasureHeartRate = false;
+      Serial.println("Pengukuran HR dihentikan.");
+      // isAllowToSendData = true;
+      isAllowMeasureOxy = true;
+      isAllowTolcdOxy = true;
+      oxyTimeStamp = millis();
+    }
+
+    // 3 --- Oxygen
+    if (isAllowMeasureOxy == true)
+    {
+      // lcd ONCE
+      if (isAllowTolcdOxy)
+      {
+        Serial.println("Pengukuran SpO2");
+        lcd.clear();
+        lcd.setCursor(1, 0);
+        lcd.print("Ukur SpO2 ");
+        // delay(5000);
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("SpO2");
+        lcd.print(" | ");
+        lcd.print("Tahan..");
+        isAllowTolcdOxy = false;
+      }
+
+      // Lakukan Pengukuran Oksigen
+      bufferLength = 100; // buffer length of 100 stores 4 seconds of samples running at 25sps
+
+      // read the first 100 samples, and determine the signal range
+      for (byte i = 0; i < bufferLength; i++)
+      {
+        while (particleSensor.available() == false) // do we have new data?
+          particleSensor.check();                   // Check the sensor for new data
+
+        redBuffer[i] = particleSensor.getRed();
+        irBuffer[i] = particleSensor.getIR();
+        particleSensor.nextSample(); // We're finished with this sample so move to next sample
+
+        Serial.print(F("red="));
+        Serial.print(redBuffer[i], DEC);
+        Serial.print(F(", ir="));
+        Serial.println(irBuffer[i], DEC);
+      }
+
+      // calculate heart rate and SpO2 after first 100 samples (first 4 seconds of samples)
+      maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+
+      // Continuously taking samples from MAX30102.  Heart rate and SpO2 are calculated every 1 second
+      while (1 && particleSensor.getIR() >= 100000)
+      {
+        // dumping the first 30 sets of samples in the memory and shift the last 70 sets of samples to the top
+        for (byte i = 30; i < 100; i++)
+        {
+          redBuffer[i - 30] = redBuffer[i];
+          irBuffer[i - 30] = irBuffer[i];
+        }
+
+        // take 70 sets of samples before calculating the heart rate.
+        for (byte i = 70; i < 100; i++)
+        {
+          while (particleSensor.available() == false) // do we have new data?
+            particleSensor.check();                   // Check the sensor for new data
+
+          digitalWrite(readLED, !digitalRead(readLED)); // Blink onboard LED with every data read
+
+          redBuffer[i] = particleSensor.getRed();
+          irBuffer[i] = particleSensor.getIR();
+          particleSensor.nextSample(); // We're finished with this sample so move to next sample
+
+          // send samples and calculation result to terminal program through UART
+
+          // int32_t trueHR = heartRate - 85.2;
+          // int32_t trueOxy = spo2 - 2.4;
+
+          if (validSPO2 == 1 && spo2 >= 88)
+          {
+            Serial.print(F("red="));
+            Serial.print(redBuffer[i], DEC);
+            Serial.print(F(", ir="));
+            Serial.print(irBuffer[i], DEC);
+
+            Serial.print(F(", SPO2="));
+            Serial.print(spo2, DEC);
+
+            Serial.print(F(", SPO2Valid="));
+            Serial.println(validSPO2, DEC);
+
+            // lcd.print(" | ");
+            lcd.setCursor(5, 1);
+            lcd.print(spo2);
+            lcd.print(" %");
+
+            // heartDataCounter += 1;
+            // heartTotalData += trueHR;
+            oxyDataCounter += 1;
+            oxyTotalData += spo2;
+
+            if (oxyDataCounter == OXY_SAMPLE)
+            {
+              isAllowMeasureOxy = false;
+              Serial.println("Pengukuran dengan MAX30102 SpO2 dihentikan.");
+              isAllowToSendData = true;
+              break;
+            }
+          }
+        }
+
+        if (oxyDataCounter == OXY_SAMPLE)
+        {
+          isAllowMeasureOxy = false;
+          Serial.println("Pengukuran dengan MAX30102 SpO2 dihentikan.");
+          isAllowToSendData = true;
+          break;
+        }
+
+        // //After gathering 25 new samples recalculate HR and SP02
+        maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+      }
     }
 
     if (isAllowToSendData)
     {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Mengirim data...");
 
       // LAKUKAN PERHITUNGAN RATA-RATA MLX DI SINI
       long tempavg = temperatureTotalData / temperatureDataCounter;
@@ -373,17 +447,25 @@ void loop()
       String tempavg_str;
       tempavg_str = String(tempavg);
 
-      // LAKUKAN PERHITUNGAN RATA-RATA MAX DI SINI
-      long heartavg = heartTotalData / heartDataCounter;
+      long heartavg = beatAvg;
       Serial.print("Rata-rata HR:");
       Serial.println(heartavg);
 
       String heartavg_str;
       heartavg_str = String(heartavg);
 
-      long oxyavg = oxyTotalData / oxyDataCounter;
-      Serial.print("Rata-rata SpO2:");
-      Serial.println(oxyavg);
+      Serial.print("Total SpO2: ");
+      Serial.println(oxyDataCounter);
+      Serial.print("Measurement Taken: ");
+      Serial.println(oxyTotalData);
+
+      long oxyavg;
+      if (oxyDataCounter > 0)
+      {
+        oxyavg = oxyTotalData / oxyDataCounter;
+        Serial.print("Rata-rata SpO2:");
+        Serial.println(oxyavg);
+      }
 
       String oxyavg_str;
       oxyavg_str = String(oxyavg);
@@ -410,8 +492,7 @@ void loop()
 
       delay(2000);
       lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Berhasil mengirim");
+      lcd.print("Berhasil dikirim");
       delay(2000);
 
       String finishData = "{\"deviceId\" : \"" + DEVICE_ID + "\"}";
